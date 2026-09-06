@@ -678,6 +678,10 @@ fi
 # -- separates options from positional prompt arg (--allowedTools is variadic)
 CLAUDE_OPTS+=(--)
 
+# Arka plana atilan claude stdin'i /dev/null alir ve arayuzu hic cizmez.
+# Terminal varsa tty'yi ver ki oturumda ne yaptigi gorunsun.
+AP_STDIN=/dev/null; [[ -c /dev/tty ]] && AP_STDIN=/dev/tty
+
 # ============================================================================
 # COMMAND MODE LOOP
 # ============================================================================
@@ -738,7 +742,7 @@ After the command completes, immediately output COMPLETE and exit. Do not wait f
 LOOPSTATE
 
             # Run Claude with the command wrapped in autonomous instructions
-            claude "${CLAUDE_OPTS[@]}" "Run $FULL_COMMAND autonomously. Do not ask for user input - make reasonable choices yourself. When the command completes, output COMPLETE and stop." &
+            claude "${CLAUDE_OPTS[@]}" "Run $FULL_COMMAND autonomously. Do not ask for user input - make reasonable choices yourself. When the command completes, output COMPLETE and stop." < "$AP_STDIN" &
             CLAUDE_PID=$!
             CURRENT_CLAUDE_PID=$CLAUDE_PID
 
@@ -883,14 +887,27 @@ while true; do
         SESSION_START_EPOCH=$(date +%s)
 
         # Run Claude in background so we can monitor for batch completion
-        claude "${CLAUDE_OPTS[@]}" "$AUTOPILOT_CMD" &
+        claude "${CLAUDE_OPTS[@]}" "$AUTOPILOT_CMD" < "$AP_STDIN" &
         CLAUDE_PID=$!
         CURRENT_CLAUDE_PID=$CLAUDE_PID
 
         # Monitor for batch completion by checking task JSON
-        IDLE_TIMEOUT=1800  # 30 minutes with no progress = assume stuck
+        IDLE_TIMEOUT=600  # 10 dk requirement ilerlemesi YOK ise stuck adayi
         LAST_PROGRESS=0
         IDLE_SECONDS=0
+
+        # Donma mi, mesgul mu? Son 3 dk icinde proje agacinda ya da /tmp'de
+        # (Claude komut ciktilarini oraya yonlendirir) yazilan dosya varsa;
+        # kodlama/derleme/test/INDIRME suruyor demektir -> oldurme. Hicbir sey
+        # degismiyorsa gercekten donmus. Tarama cok uzun surerse mesgul say
+        # (rc=124), bosuna calisan is'i oldurup sonsuz loop'a girme.
+        fs_active() {
+            timeout 5 bash -c '
+                find "$1" -type f -mmin -3 -not -path "*/.git/*" -print -quit 2>/dev/null | grep -q . && exit 0
+                find /tmp -maxdepth 1 -type f -mmin -3 -print -quit 2>/dev/null | grep -q . && exit 0
+                exit 1' _ "$PWD"
+            [[ $? -ne 1 ]]   # 0=aktif dosya bulundu, 124=timeout -> mesgul; yalniz 1=hareketsiz
+        }
 
         while kill -0 "$CLAUDE_PID" 2>/dev/null; do
             # Check for manual stop request
@@ -946,13 +963,20 @@ while true; do
                     rm -f "$LOOP_STATE_FILE"
                     break
                 fi
-                # No progress at all and idle too long = stuck
+                # Ilerleme yok VE cok bekledik. Gercekten donduysa (disk de
+                # hareketsizse) dusur. Indirme/derleme/test surerken dosyalar
+                # degisir -> o zaman bekle, bosuna oldurup sonsuz loop'a girme.
                 if [[ "$PROGRESS" -eq 0 && "$IDLE_SECONDS" -ge "$IDLE_TIMEOUT" ]]; then
-                    echo ""
-                    echo -e "${YELLOW}No progress for ${IDLE_TIMEOUT}s - terminating idle session...${NC}"
-                    kill_session "$CLAUDE_PID"
-                    rm -f "$LOOP_STATE_FILE"
-                    break
+                    if fs_active; then
+                        # mesgul: sayaci 1 dk geri al, ~60 sn sonra tekrar bak
+                        IDLE_SECONDS=$((IDLE_TIMEOUT - 60))
+                    else
+                        echo ""
+                        echo -e "${YELLOW}${IDLE_TIMEOUT}s ilerleme yok ve disk hareketsiz - donan session dusuruluyor...${NC}"
+                        kill_session "$CLAUDE_PID"
+                        rm -f "$LOOP_STATE_FILE"
+                        break
+                    fi
                 fi
             fi
 
