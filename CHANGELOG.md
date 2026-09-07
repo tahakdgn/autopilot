@@ -5,8 +5,7 @@ All notable changes to Autopilot will be documented in this file.
 ## 2026-09-07
 
 ### Added
-- **Windows helpers shipped in the repo (`windows/`)** - `autopilot-forever`, `autopilot-progress`, `autopilot-watch` and `autopilot-unstick` previously existed only in local `~/.local/bin` installs, so a fresh clone gave no loop wrapper at all: `run.sh` stopped at its iteration cap and nothing restarted it across a usage limit. `install.sh` now installs all four, guarded on `uname` since they lean on `schtasks`, `winpty` and `chcp`. Documented in a new **Windows** section of the README, together with the two-pane Windows Terminal launcher.
-- **`windows/wrapper.cmd`** - One `.cmd` template instead of nine byte-identical copies that differed only in the name they invoked. `cmd.exe` already knows its own name, so `%~n0` resolves to the sibling bash script; `install.sh` copies the template under each command name, and a tenth command needs no new file.
+- **`.cmd` wrappers for the terminal commands (`windows/wrapper.cmd`)** - `autopilot`, `autopilot-queue`, `autopilot-status`, `autopilot-cleanup` and `autopilot-test-stories` are bash scripts, so they were unreachable from `cmd.exe`, PowerShell and Windows Terminal. `install.sh` now copies one wrapper template under each command name; `cmd.exe` knows its own name, so `%~n0` resolves to the sibling bash script and a new command needs no new wrapper. Documented in a new **Windows** section of the README, which also points at [autopilot-forever](https://github.com/tahakdgn/autopilot-forever) for running unattended across usage limits.
 - **`.gitattributes`** - `core.autocrlf=true` is the Windows default and the repo pinned nothing, so a fresh clone handed out `run.sh` with a CR on every line. Git Bash tolerates that; another bash reports `$'\r': command not found`. Shell scripts are now pinned to LF, `.cmd` to CRLF.
 
 ## 2026-07-09

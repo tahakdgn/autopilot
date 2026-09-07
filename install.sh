@@ -177,32 +177,16 @@ ln -s "$SCRIPT_DIR/autopilot-test-stories" ~/.local/bin/autopilot-test-stories
 echo "  Linked: autopilot-test-stories → ~/.local/bin/autopilot-test-stories"
 
 echo ""
-# Windows helpers: the wrapper loop that keeps run.sh alive across usage limits,
-# plus the panes that watch it. Git Bash only -- they lean on schtasks/winpty/chcp.
+# Windows: a .cmd wrapper per command, so they run from cmd.exe, PowerShell and
+# Windows Terminal too. They have to be real copies -- cmd.exe cannot follow an
+# MSYS symlink -- but one template serves all of them: each copy finds its own
+# bash script through its own file name (%~n0).
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    echo "Installing Windows helpers..."
-    for w in autopilot-forever autopilot-progress autopilot-unstick autopilot-watch; do
-        if [ -L ~/.local/bin/$w ]; then
-            rm ~/.local/bin/$w
-        elif [ -f ~/.local/bin/$w ]; then
-            echo "Backing up existing ~/.local/bin/$w to $w.bak"
-            mv ~/.local/bin/$w ~/.local/bin/$w.bak
-        fi
-        chmod +x "$SCRIPT_DIR/windows/$w"
-        ln -s "$SCRIPT_DIR/windows/$w" ~/.local/bin/$w
-        echo "  Linked: windows/$w -> ~/.local/bin/$w"
-    done
-
-    # The .cmd wrappers have to be real copies: cmd.exe cannot follow an MSYS
-    # symlink. One template serves all nine -- each copy finds its own bash
-    # script through its own file name (%~n0).
-    for c in autopilot autopilot-cleanup autopilot-status autopilot-queue \
-             autopilot-test-stories autopilot-forever autopilot-progress \
-             autopilot-unstick autopilot-watch; do
+    for c in autopilot autopilot-cleanup autopilot-status autopilot-queue autopilot-test-stories; do
         cp -f "$SCRIPT_DIR/windows/wrapper.cmd" ~/.local/bin/$c.cmd
     done
-    echo "  Installed: 9 .cmd wrappers -> ~/.local/bin/ (for cmd.exe and Windows Terminal)"
+    echo "  Installed: .cmd wrappers -> ~/.local/bin/ (for cmd.exe and Windows Terminal)"
     ;;
 esac
 
@@ -224,12 +208,6 @@ echo "  autopilot queue [add|rm|hold|list]     - Manage the project task queue (
 echo "  autopilot test-stories <domain.md>     - Audit user stories against existing features"
 echo "  autopilot-cleanup                      - Kill orphaned Claude processes (from terminal)"
 echo "  autopilot-status [taskfile]            - Read-only health check, no Claude session needed (from terminal)"
-echo ""
-echo "Windows only:"
-echo "  autopilot-forever [taskfile]           - Restart the loop across usage limits; wakes a sleeping PC at reset"
-echo "  autopilot-progress [-w] [dir]          - Live pane: uptime, progress and the current action"
-echo "  autopilot-watch [dir]                  - Follow the session transcript, one line per step"
-echo "  autopilot-unstick [dir]                - Kill a session that hung at startup so the loop moves on"
 echo ""
 echo "Usage:"
 echo "  autopilot docs/autopilot/feature/feature.json    # Fresh context per requirement"
