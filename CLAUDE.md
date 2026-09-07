@@ -38,6 +38,7 @@ Before making design or architecture decisions (new state files, where status li
 - `run.sh` - Token-frugal bash wrapper for fresh sessions per requirement
 - `autopilot-queue` - Queue management subcommand (`autopilot queue add/rm/hold/list/next`)
 - `cleanup.sh` - Kills orphaned Claude Code processes (MCP servers, subagents, workers)
+- `windows/` - Git Bash helpers installed only on Windows: `autopilot-forever` (restarts run.sh across usage limits, wakes a sleeping PC at reset), `autopilot-progress` (live pane), `autopilot-watch` (transcript tail), `autopilot-unstick` (kills a session hung at startup), and `wrapper.cmd` — one `.cmd` template that `install.sh` copies under each command name, resolving its bash script through `%~n0`
 
 **Generated in User Projects**:
 - `autopilot.json` - Feedback loops, iterations, project conventions

@@ -63,6 +63,7 @@ autopilot tasks.json
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) with an active subscription
 - [jq](https://jqlang.github.io/jq/) - JSON processor (used by `autopilot` (bash) to check task status)
+- On Windows: [Git for Windows](https://gitforwindows.org/) (all scripts are bash) and, for the two-pane launcher, [Windows Terminal](https://aka.ms/terminal)
 - A project with feedback loops:
   - **Tests** - Any test runner (Jest, Vitest, pytest, go test, RSpec, etc.)
   - **Linter** - Any linter (ESLint, Ruff, golangci-lint, RuboCop, etc.)
@@ -92,6 +93,11 @@ This creates symlinks:
 - `~/.local/bin/autopilot` → repo/`run.sh` (terminal command)
 - `~/.local/bin/autopilot-cleanup` → repo/`cleanup.sh` (process cleanup)
 - `~/.local/bin/autopilot-status` → repo/`status.sh` (read-only health check)
+
+On Windows (Git Bash) it also installs `~/.local/bin/autopilot-forever`,
+`autopilot-progress`, `autopilot-watch` and `autopilot-unstick` from `windows/`,
+plus a `.cmd` wrapper per command so they run from `cmd.exe` and Windows
+Terminal too. See [Windows](#windows).
 
 The install script also registers the stop hook in `~/.claude/settings.json` under `hooks.Stop` — the only place Claude Code reads hook configuration from. (Do **not** use `~/.claude/hooks.json`; Claude Code ignores that file.)
 
@@ -836,6 +842,90 @@ Then in your task file, scope requirements to specific packages:
 
 See `examples/autopilot-monorepo.json` and `examples/tasks-monorepo.json` for complete examples.
 
+## Windows
+
+Everything above works in Git Bash. On Windows, `install.sh` additionally
+installs four helpers from `windows/`, plus `.cmd` wrappers so every autopilot
+command is callable from `cmd.exe`, PowerShell and Windows Terminal.
+
+### Keeping the loop alive: `autopilot-forever`
+
+`autopilot` stops at its iteration cap — and burns through those iterations
+instantly once Claude's usage limit is hit. `autopilot-forever` wraps it:
+restarts the run, sleeps out the limit, and registers a `WakeToRun` scheduled
+task so a sleeping PC wakes itself at the reset time. Progress is read from the
+task JSON (ground truth) and the limit is confirmed with one cheap `claude -p`
+probe rather than by scraping session output.
+
+```bash
+autopilot-forever                                      # queue mode, like bare `autopilot`
+autopilot-forever docs/autopilot/billing/billing.json  # one task file
+```
+
+| Env | Default | Effect |
+|---|---|---|
+| `AUTOPILOT_RETRY` | `900` | Fallback wait when no reset time is printed |
+| `AUTOPILOT_DELAY` | `10` | Seconds between restarts |
+| `AUTOPILOT_NOWAKE` | — | `1` = never touch the Windows scheduler |
+| `AUTOPILOT_NOPTY` | — | `1` = do not wrap run.sh in winpty (pair with ConPTY) |
+| `AUTOPILOT_NO_UNSTICK` | — | `1` = do not run the hung-session watchdog |
+
+### Watching it: `autopilot-progress`, `autopilot-watch`
+
+`autopilot-progress [-w] [dir]` is a one-screen pane: how long the run has been
+up, how far it has got, and the action in flight. `-w` refreshes every 5s.
+
+`autopilot-watch [dir]` tails the session transcript, one readable line per
+thought, tool call and result — `run.sh` starts Claude as a background job, so
+its TUI never reaches the terminal, but the transcript is still written.
+
+### Unwedging it: `autopilot-unstick`
+
+A session occasionally hangs at startup: the process is alive, its transcript
+holds a single `ai-title` line, and the loop waits on it forever.
+`autopilot-unstick [dir]` kills only sessions whose transcript is still empty
+(under 2 KB, silent for 60s — both tunable via `AP_UNSTICK_SIZE` and
+`AP_UNSTICK_AGE`). `run.sh` sees the child die and starts a fresh session; no
+work is lost, because the task file holds the state. It runs automatically from
+`autopilot-forever` unless `AUTOPILOT_NO_UNSTICK=1`.
+
+### Two-pane launcher
+
+A `.bat` that opens Windows Terminal with the loop on the left and live progress
+on the right:
+
+```bat
+@echo off
+set "MSYS=enable_pcon"
+set "AUTOPILOT_NOPTY=1"
+set "BASH=C:\Program Files\Git\bin\bash.exe"
+
+wt.exe new-tab --title Autopilot "%BASH%" --login -i -c "source ~/autopilot-pane.sh" ; split-pane -V --title Progress "%BASH%" --login -i -c "autopilot-progress -w ~/projects/my-project"
+```
+
+```bash
+# ~/autopilot-pane.sh
+cd "$HOME/projects/my-project" || exit 1
+
+# stale lock: clear it only if the process is really gone
+for P in docs/autopilot/run.pid .autopilot/queue.pid; do
+  [ -f "$P" ] && ! kill -0 "$(cat "$P")" 2>/dev/null && rm -f "$P"
+done
+
+unset CLAUDE_CODE_CHILD_SESSION          # a leaked child-session marker disables transcript logging
+chcp.com 65001 >/dev/null 2>&1 || true   # a non-UTF-8 code page mangles node's output
+
+autopilot-forever
+exec bash
+```
+
+Two traps:
+
+- Call the pane through `source <script>.sh`. Written inline in the `.bat`, the
+  command would contain `;`, which Windows Terminal reads as a pane separator.
+- If the Claude TUI renders as garbage (`?[38;2`, `OcOc`), drop the
+  `set "MSYS=enable_pcon"` line — that machine wants winpty, not ConPTY.
+
 ## Tips
 
 - **Start with HITL**: Watch the first few iterations before going AFK
@@ -1059,6 +1149,7 @@ Remove the symlinks:
 ```bash
 rm ~/.claude/commands/{prd,tasks,autopilot,autopilot:init,analyze}.md ~/.claude/AGENTS.md
 rm ~/.local/bin/autopilot ~/.local/bin/autopilot-cleanup ~/.local/bin/autopilot-status ~/.local/bin/autopilot-queue ~/.local/bin/autopilot-test-stories
+rm -f ~/.local/bin/autopilot-{forever,progress,watch,unstick} ~/.local/bin/autopilot*.cmd  # Windows
 rm ~/.claude/hooks/autopilot-stop-hook.sh
 ```
 
