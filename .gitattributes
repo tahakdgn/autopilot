@@ -1,0 +1,5 @@
+# Shell scripts break outside Git Bash's CR tolerance if they carry CR, and
+# core.autocrlf=true is the Windows default -- so pin LF here and on checkout.
+# .cmd is the one thing cmd.exe genuinely wants with CRLF.
+* text=auto eol=lf
+*.cmd text eol=crlf
