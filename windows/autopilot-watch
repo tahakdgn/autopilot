@@ -1,0 +1,65 @@
+#!/bin/bash
+#
+# autopilot-watch - follow what the autopilot session is actually doing.
+#
+# run.sh starts Claude as a background job, so its TUI never reaches the
+# terminal. The session transcript does get written though, so tail that
+# instead: one readable line per thought, tool call and result.
+#
+# Usage:  autopilot-watch [proje-dizini]     # varsayılan: bulunduğun dizin
+#
+set -u
+
+PROJ="$(cd "${1:-.}" && pwd -W 2>/dev/null || pwd)"
+# Claude Code slugifies the project path: C:/a/b_c -> C--a-b-c
+SLUG=$(echo "$PROJ" | tr ':\/_' '----')
+DIR="$HOME/.claude/projects/$SLUG"
+
+[[ -d "$DIR" ]] || { echo "transcript dizini yok: $DIR" >&2; exit 1; }
+ls "$DIR"/*.jsonl >/dev/null 2>&1 || { echo "henüz oturum yok: $DIR" >&2; exit 1; }
+
+# run.sh starts a fresh session per requirement, so follow the newest transcript
+# and hop over when a newer one appears.
+while true; do
+    F=$(ls -t "$DIR"/*.jsonl | head -1)
+    echo ""
+    echo "--- oturum: $(basename "$F") ---"
+    ( while :; do sleep 5; [[ "$(ls -t "$DIR"/*.jsonl | head -1)" != "$F" ]] && break; done ) &
+    WATCHDOG=$!
+    tail -n 40 -f "$F" --pid="$WATCHDOG" | python -c '
+import sys, json
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+def short(s, n=160):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[:n] + "..."
+
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    content = (d.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        continue
+    for c in content:
+        t = c.get("type")
+        if t == "text" and c.get("text", "").strip():
+            print("\n  " + short(c["text"], 400))
+        elif t == "thinking" and c.get("thinking", "").strip():
+            print("\n  ~ " + short(c["thinking"], 300))
+        elif t == "tool_use":
+            i = c.get("input") or {}
+            arg = i.get("command") or i.get("file_path") or i.get("pattern") or i.get("description") or ""
+            print("  > %-10s %s" % (c.get("name", "?"), short(arg, 120)))
+        elif t == "tool_result":
+            body = c.get("content")
+            if isinstance(body, list):
+                body = " ".join(x.get("text", "") for x in body if isinstance(x, dict))
+            mark = "!" if c.get("is_error") else "."
+            if body:
+                print("  %s %s" % (mark, short(body, 120)))
+    sys.stdout.flush()
+'
+    kill "$WATCHDOG" 2>/dev/null
+done

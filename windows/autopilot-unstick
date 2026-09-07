@@ -1,0 +1,61 @@
+#!/bin/bash
+#
+# autopilot-unstick - acilista donan Claude session'i dusurur, dongu devam eder.
+#
+# Belirti: session baslar, oturum kaydina sadece {"type":"ai-title",...} satirini
+# yazar ve orada kalir. Surec canlidir ama CPU'su sabittir - gorunmeyen bir
+# aciilis diyalogunda bekler. run.sh o session'i beklediginden dongu ilerlemez.
+#
+# Cozum: kaydi bos kalmis session'i oldurmek. run.sh cocugunun oldugunu gorup
+# hemen taze bir session baslatir; is kaybi olmaz, gereksinim dosyasi durumu tutar.
+#
+# Yalnizca ICI BOS kayitlara dokunur (varsayilan 2 KB alti). Calisan bir session
+# uzun bir komutta (build_runner, flutter test) dakikalarca yazmayabilir - onun
+# kaydi zaten buyuk oldugu icin bu esikten etkilenmez.
+#
+# Usage:  autopilot-unstick [proje-dizini]
+#   AP_UNSTICK_AGE   kac saniye sessizlikten sonra mudahale (varsayilan 60)
+#                    olculdu: saglikli session ilk mesajini dosya olustugu
+#                    saniyede yazar, bu yuzden 60 sn fazlasiyla guvenli
+#   AP_UNSTICK_SIZE  bu boyutun altindaki kayit "bos" sayilir (varsayilan 2000)
+#
+set -u
+
+PROJ="$(cd "${1:-.}" && pwd -W 2>/dev/null || pwd)"
+SLUG=$(echo "$PROJ" | tr ':\/_' '----')
+DIR="$HOME/.claude/projects/$SLUG"
+AGE=${AP_UNSTICK_AGE:-60}
+SIZE=${AP_UNSTICK_SIZE:-2000}
+LOG="$HOME/.claude/autopilot-unstick.log"
+
+echo "izleniyor: $PROJ"
+echo "  bos kayit esigi: ${SIZE} bayt / ${AGE} sn sessizlik"
+echo "  gunluk: $LOG"
+echo "  Ctrl-C ile cik"
+echo ""
+
+while true; do
+    sleep 30
+
+    PIDF="$PROJ/docs/autopilot/run.pid"
+    [[ -f "$PIDF" ]] || PIDF=$(ls "$PROJ"/docs/autopilot/*/run.pid 2>/dev/null | head -1)
+    [[ -n "${PIDF:-}" && -f "$PIDF" ]] || { echo "$(date +%H:%M:%S) otopilot calismiyor"; continue; }
+
+    RUNPID=$(cat "$PIDF" 2>/dev/null)
+    kill -0 "$RUNPID" 2>/dev/null || { echo "$(date +%H:%M:%S) otopilot calismiyor"; continue; }
+
+    ls "$DIR"/*.jsonl >/dev/null 2>&1 || continue
+    F=$(ls -t "$DIR"/*.jsonl | head -1)
+    SZ=$(wc -c < "$F")
+    SESSIZ=$(( $(date +%s) - $(date -r "$F" +%s) ))
+
+    if (( SZ < SIZE && SESSIZ > AGE )); then
+        # run.pid'in claude cocugunu bul
+        CPID=$(ps | awk -v p="$RUNPID" '$2 == p && /claude/ { print $1 }' | head -1)
+        if [[ -n "$CPID" ]]; then
+            MSG="$(date '+%F %T') donan session dusuruldu: $(basename "$F") (${SZ} bayt, ${SESSIZ} sn sessiz) pid=$CPID"
+            echo "$MSG" | tee -a "$LOG"
+            kill -9 "$CPID" 2>/dev/null
+        fi
+    fi
+done

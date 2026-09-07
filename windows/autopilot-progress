@@ -1,0 +1,259 @@
+#!/bin/bash
+#
+# autopilot-progress - tek ekranda "ne kadar suredir calisiyor, su an ne yapiyor".
+#
+# autopilot-status gorev dosyasinin durumunu verir; autopilot-watch her satiri
+# doker. Aradaki bosluk bu: sure, ilerleme ve o anki eylem, tek bakista.
+#
+# Usage:  autopilot-progress [-w] [proje-dizini]
+#           -w   5 saniyede bir tazele (Ctrl-C ile cik)
+#
+set -u
+
+WATCH=0
+[[ "${1:-}" == "-w" ]] && { WATCH=1; shift; }
+
+PROJ="$(cd "${1:-.}" && pwd -W 2>/dev/null || pwd)"
+SLUG=$(echo "$PROJ" | tr ':\/_' '----')
+
+render() {
+    # run.pid MSYS pid tutar; Windows python bunu goremedigi icin canlilik burada olculur
+    AP_PID=""; AP_ALIVE=0
+    PIDF=$(ls "$PROJ"/docs/autopilot/run.pid "$PROJ"/docs/autopilot/*/run.pid 2>/dev/null | head -1)
+    if [[ -n "$PIDF" ]]; then
+        AP_PID=$(cat "$PIDF" 2>/dev/null)
+        [[ -n "$AP_PID" ]] && kill -0 "$AP_PID" 2>/dev/null && AP_ALIVE=1
+    fi
+    PROJ="$PROJ" SLUG="$SLUG" HOME="$HOME" AP_PID="$AP_PID" AP_ALIVE="$AP_ALIVE" python -c '
+import os, sys, json, glob, time, io, re, subprocess
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+proj = os.environ["PROJ"]
+home = os.environ["HOME"]
+tdir = os.path.join(home, ".claude", "projects", os.environ["SLUG"])
+
+C = {"dim": "\033[2m", "b": "\033[1m", "g": "\033[0;32m",
+     "y": "\033[1;33m", "r": "\033[0;31m", "0": "\033[0m"}
+
+def sure(sn):
+    sn = int(sn)
+    if sn < 60:
+        return "%d sn" % sn
+    if sn < 3600:
+        return "%d dk %d sn" % (sn // 60, sn % 60)
+    return "%d sa %d dk" % (sn // 3600, (sn % 3600) // 60)
+
+def satir(etiket, deger, renk=""):
+    print("  %-11s %s%s%s" % (etiket, renk, deger, C["0"] if renk else ""))
+
+# --- gorev dosyasi: ilerleme ve o anki gereksinim ---
+def _adaylar():
+    return sorted(
+        glob.glob(os.path.join(proj, "docs", "autopilot", "*", "*.json"))
+        + glob.glob(os.path.join(proj, "docs", "autopilot", "*.json"))
+    )
+
+def _oku(f):
+    if not f or "analytics" in f or f.endswith("-notes.json") or not os.path.exists(f):
+        return None, []
+    try:
+        d = json.load(io.open(f, encoding="utf-8"))
+    except Exception:
+        return None, []
+    r = [x for x in (d.get("requirements") or []) if isinstance(x, dict) and "passes" in x]
+    return (d, r) if r else (None, [])
+
+def _kalan_var(r):
+    return any(
+        not x.get("passes") and not x.get("stuck") and not x.get("invalidTest") for x in r
+    )
+
+# Kuyruk modunda docs/autopilot altinda onlarca gorev dosyasi olur; ilkini secmek
+# coktan bitmis bir fazi gostermeye devam ediyordu. Sirasiyla: run.sh dosyasinin
+# yazdigi loop-state.md, sonra bitmemis ilk dosya, sonra son dosya.
+task, reqs, secilen = None, [], None
+_aktif_yol = None
+_ls = os.path.join(proj, "docs", "autopilot", "loop-state.md")
+if os.path.exists(_ls):
+    _m = re.search(r"^task_file:\s*(.+)$", io.open(_ls, encoding="utf-8",
+                                                   errors="replace").read(), re.M)
+    if _m:
+        _aktif_yol = os.path.join(proj, _m.group(1).strip())
+task, reqs = _oku(_aktif_yol)
+if reqs:
+    secilen = _aktif_yol
+if not reqs:
+    for f in _adaylar():
+        d, r = _oku(f)
+        if r and _kalan_var(r):
+            task, reqs, secilen = d, r, f
+            break
+if not reqs:
+    for f in _adaylar():
+        d, r = _oku(f)
+        if r:
+            task, reqs, secilen = d, r, f
+
+# --- kuyruk geneli: butun gorev dosyalarinin toplami ---
+kuyruk = []
+for f in _adaylar():
+    d, r = _oku(f)
+    if r:
+        kuyruk.append((f, sum(1 for x in r if x.get("passes") is True), len(r)))
+genel_ok = sum(b for _, b, _ in kuyruk)
+genel_top = sum(t for _, _, t in kuyruk)
+biten_dosya = sum(1 for _, b, t in kuyruk if b >= t)
+sira = None
+if secilen:
+    for i, (f, _b, _t) in enumerate(kuyruk):
+        if os.path.abspath(f) == os.path.abspath(secilen):
+            sira = i + 1
+            break
+
+def _aktif_calisma_saniyesi():
+    """Commit zaman damgalarindan kaba aktif sure: 10 dakikalik kovalar sayilir,
+    boylece gece molasi ve duraklamalar tahmine karismaz."""
+    try:
+        cikti = subprocess.run(["git", "-C", proj, "log", "--format=%ct"],
+                               capture_output=True, text=True, timeout=15).stdout
+        ts = [int(x) for x in cikti.split()]
+    except Exception:
+        return None
+    if len(ts) < 3:
+        return None
+    kova = 600
+    return len({t // kova for t in ts}) * kova
+
+# --- calisiyor mu (bash olctu, env ile geldi) ---
+pid = os.environ.get("AP_PID") or None
+alive = os.environ.get("AP_ALIVE") == "1"
+
+# --- tur baslangici: sarmalayici logunun son "round" satiri ---
+basladi = None
+logp = os.path.join(home, ".claude", "autopilot-forever.log")
+if os.path.exists(logp):
+    for ln in io.open(logp, encoding="utf-8", errors="replace"):
+        if "=== round" in ln:
+            try:
+                basladi = time.mktime(time.strptime(ln.split(" === ")[0].strip(),
+                                                    "%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                pass
+
+# --- canli oturum kaydi: son hareket ve o anki eylem ---
+eylem, son_islem, sessiz = None, None, None
+kayitlar = sorted(glob.glob(os.path.join(tdir, "*.jsonl")), key=os.path.getmtime)
+if kayitlar:
+    f = kayitlar[-1]
+    sessiz = time.time() - os.path.getmtime(f)
+    olaylar = []
+    for ln in io.open(f, encoding="utf-8", errors="replace"):
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            continue
+        c = (d.get("message") or {}).get("content")
+        if isinstance(c, list):
+            olaylar.extend(c)
+    for x in reversed(olaylar):
+        t = x.get("type")
+        if t == "thinking" and not eylem:
+            eylem = "düşünüyor"
+        elif t == "text" and x.get("text", "").strip() and not eylem:
+            eylem = "yazıyor"
+        elif t == "tool_use":
+            i = x.get("input") or {}
+            arg = i.get("file_path") or i.get("command") or i.get("pattern") or ""
+            arg = " ".join(str(arg).split())
+            if arg.startswith(proj):
+                arg = arg[len(proj):].lstrip("/\\")
+            ad = x.get("name", "?")
+            if not eylem:
+                eylem = {"Bash": "komut çalıştırıyor", "Write": "dosya yazıyor",
+                         "Edit": "dosya düzenliyor", "Read": "dosya okuyor",
+                         "Grep": "arama yapıyor", "Glob": "dosya arıyor"}.get(ad, ad)
+            son_islem = "%s  %s" % (ad, arg[:70])
+            break
+    if not eylem:
+        eylem = "başlıyor"
+
+# --- ciktı ---
+ad = (task or {}).get("title") or os.path.basename(proj)
+print()
+_baslik = "  %s%s%s" % (C["b"], ad[:64], C["0"])
+if sira:
+    _baslik += "%s   [faz %d/%d]%s" % (C["dim"], sira, len(kuyruk), C["0"])
+print(_baslik)
+print()
+
+now = time.time()
+# run.pid, tur baslar baslamaz degil birkac saniye sonra yazilir; son tur cok
+# yeniyse kirmizi "calismiyor" yerine "basliyor" goster (baslangici yaniltmasin).
+basliyor = (not alive) and basladi and (now - basladi) < 120
+
+if alive:
+    satir("Durum", "çalışıyor  (PID %s)" % pid, C["g"])
+elif basliyor:
+    satir("Durum", "başlıyor…", C["y"])
+else:
+    satir("Durum", "çalışmıyor", C["r"])
+
+if basladi and (alive or basliyor):
+    satir("Süre", "%s  (%s)" % (sure(now - basladi),
+                                time.strftime("%H:%M", time.localtime(basladi))))
+elif basladi:
+    satir("Son tur", time.strftime("%d %b %H:%M", time.localtime(basladi)), C["dim"])
+
+if reqs:
+    ok = sum(1 for r in reqs if r.get("passes") is True)
+    stuck = sum(1 for r in reqs if r.get("stuck") is True)
+    bar_n = 24
+    dolu = int(bar_n * ok / len(reqs))
+    satir("İlerleme", "%s%s  %d / %d%s" % ("█" * dolu, "·" * (bar_n - dolu), ok, len(reqs),
+                                           ("   takılan: %d" % stuck) if stuck else ""))
+    simdi = next((r for r in reqs
+                  if not r.get("passes") and not r.get("stuck") and not r.get("invalidTest")), None)
+    if simdi:
+        satir("Şu an", "%s  %s" % (simdi.get("id", "?"), (simdi.get("title") or "")[:52]))
+    elif not stuck:
+        satir("Şu an", "bütün gereksinimler bitti", C["g"])
+
+if genel_top and len(kuyruk) > 1:
+    bar_n = 24
+    dolu = int(bar_n * genel_ok / genel_top)
+    satir("Genel", "%s%s  %d / %d madde  ·  %d / %d faz" % (
+        "█" * dolu, "·" * (bar_n - dolu), genel_ok, genel_top, biten_dosya, len(kuyruk)))
+    _aktif_sn = _aktif_calisma_saniyesi()
+    if _aktif_sn and genel_ok >= 3 and genel_top > genel_ok:
+        _hiz = _aktif_sn / genel_ok
+        _kalan = (genel_top - genel_ok) * _hiz
+        satir("Hız", "madde başına ~%s  (aktif çalışma)" % sure(_hiz), C["dim"])
+        satir("Tahmini", "~%s iş  ·  kesintisiz gidilirse %s" % (
+            sure(_kalan),
+            time.strftime("%d.%m %H:%M", time.localtime(time.time() + _kalan))), C["dim"])
+
+if alive:
+    if sessiz is None:
+        satir("Yapıyor", "oturum kaydı henüz yok", C["y"])
+    elif sessiz > 180:
+        satir("Yapıyor", "%s  —  %s sessiz" % (eylem, sure(sessiz)), C["y"])
+    else:
+        satir("Yapıyor", "%s  (%s önce)" % (eylem, sure(sessiz)), C["g"])
+    if son_islem:
+        satir("Son işlem", son_islem, C["dim"])
+print()
+'
+}
+
+if [[ $WATCH -eq 1 ]]; then
+    trap 'printf "\033[?25h\n"; exit 0' INT
+    printf '\033[?25l'
+    while true; do
+        OUT=$(render)
+        printf '\033[H\033[J%s\n' "$OUT"
+        sleep 5
+    done
+else
+    render
+fi
